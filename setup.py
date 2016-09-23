@@ -56,6 +56,7 @@ install_requires = [
     'jsonresolver[jsonschema]>=0.2.1',
     'invenio-logging>=1.0.0a3',
     'easywebdav>=1.2.0',
+    'doschema',
 ]
 
 if sys.version_info < (3, 4):

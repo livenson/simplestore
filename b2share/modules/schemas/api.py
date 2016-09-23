@@ -80,7 +80,10 @@ class RootSchema(object):
         if not isinstance(json_schema, dict):
             raise InvalidJSONSchemaError('json_schema must be a dict')
 
-        validate_json_schema(json_schema)
+        all_root_schemas = RootSchemaVersion.query.filter(RootSchemaVersion.version == version)
+        prev_schemas = map(lambda x: x.json_schema, all_root_schemas)
+
+        validate_json_schema(json_schema, prev_schemas)
 
         with db.session.begin_nested():
             # Force the given version to follow the previous one.
@@ -246,6 +249,8 @@ class BlockSchema(object):
 
         Args:
             json_schema (dict): the json_schema to use for this new version.
+            version_number (int): version of block schema to be inserted.
+                If set to None, first available number is used.
 
         Returns:
             :class:`b2share.modules.schemas.models.BlockSchemaVersion`:
@@ -262,7 +267,15 @@ class BlockSchema(object):
             raise BlockSchemaIsDeprecated()
         if not isinstance(json_schema, dict):
             raise InvalidJSONSchemaError('json_schema must be a dict')
-        validate_json_schema(json_schema)
+
+        block_schema_id = self.model.id
+        all_block_schema_versions = BlockSchemaVersionModel.query.filter(
+            BlockSchemaVersionModel.block_schema==block_schema_id
+        )
+
+        prev_schemas = map(lambda x: x.json_schema, all_block_schema_versions)
+
+        validate_json_schema(json_schema, prev_schemas)
         # FIXME: validate the json-schema
         with db.session.begin_nested():
             last_version = db.session.query(
@@ -510,8 +523,21 @@ class CommunitySchema(object):
             raise CommunitySchemaDoesNotExistError(id) from e
 
     @classmethod
+    def get_all_community_schemas(cls):
+        """Get list of all CommunitySchema."""
+        from .models import CommunitySchemaVersion
+        try:
+            models = CommunitySchemaVersion.query.order_by(
+                CommunitySchemaVersion.version.asc()
+            ).all()
+
+            return [cls(model) for model in models]
+        except NoResultFound as e:
+            raise CommunityDoesNotExistError() from e
+
+    @classmethod
     def create_version(cls, community_id, community_schema,
-                       root_schema_version=None):
+                       root_schema_version=None, version_number=None):
         """Create a new schema draft for the given community.
 
         Args:
@@ -522,6 +548,8 @@ class CommunitySchema(object):
                 community schema. If set to None, the root_schema of the last
                 version is used, if there is no previous version
                 (new community), the last root_schema is used.
+            version_number (int): version of community schema to be inserted.
+                If set to None, first available number is used.
 
         Returns:
             :class:`b2share.modules.schemas.api.CommunitySchema`: the
@@ -529,7 +557,13 @@ class CommunitySchema(object):
         """
         from .models import CommunitySchemaVersion
 
-        validate_json_schema(community_schema)
+        all_community_schemas = CommunitySchemaVersion.query.filter(
+            CommunitySchemaVersion.community==community_id
+        )
+        prev_schemas = [community_schema_version.community_schema for community_schema_version
+                        in all_community_schemas]
+
+        validate_json_schema(community_schema, prev_schemas)
         try:
             with db.session.begin_nested():
                 try:
@@ -539,7 +573,14 @@ class CommunitySchema(object):
                         CommunitySchemaVersion.version.desc()
                     ).limit(1).one()
 
-                    new_version = last_schema.version + 1
+                    new_version = (last_schema.version + 1 if last_schema.version is not None
+                                   else 0)
+
+                    if version_number and new_version < version_number:
+                        raise InvalidSchemaVersionError(last_schema.version)
+                    elif version_number and new_version > version_number:
+                        raise SchemaVersionExistsError(last_schema.version)
+
                     if root_schema_version is None:
                         root_schema_version = last_schema.root_schema
                 except NoResultFound:
