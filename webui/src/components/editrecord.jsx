@@ -61,6 +61,11 @@ export const EditRecordRoute = React.createClass({
         }
     },
 
+    currentUser(){
+        const { id } = this.props.params;
+        return serverCache.getUser();
+    },
+
     render() {
         const record = this.getRecordOrDraft();
         if (!record) {
@@ -74,15 +79,21 @@ export const EditRecordRoute = React.createClass({
             return <Err err={rootSchema}/>;
         }
         const community = serverCache.getCommunity(record.getIn(['metadata', 'community']));
+
         if (community instanceof Error) {
             return <Err err={community}/>;
         }
+
+        const user = this.currentUser();
+        
         return (
             <ReplaceAnimate>
                 <EditRecord record={record} community={community}
                             rootSchema={rootSchema} blockSchemas={blockSchemas}
                             refreshCache={this.refreshCache}
                             patchFn={this.patchRecordOrDraft}
+                            currentUser={user}
+                            publicationState={record.getIn(['metadata', 'publication_state'])}
                             isDraft={this.isDraft} isVersion={true} />
             </ReplaceAnimate>
         );
@@ -99,6 +110,12 @@ const EditRecord = React.createClass({
             errors: {},
             dirty: false,
             waitingForServer: false,
+            readOnly: false,
+            reviewOrPublishConfirmed: null,
+            revokeSubmitted:false,
+            isResponsibleAdmin:false,
+            adminUserIsEditing:false,
+            checkPermission: false,
         };
     },
 
@@ -122,7 +139,8 @@ const EditRecord = React.createClass({
             <EditFiles files={files ? files.toJS() : []}
                 record={this.props.record}
                 setState={setState}
-                setModal={modal => this.setState({modal})} />
+                setModal={modal => this.setState({modal})}
+                readOnly={this.state.readOnly} />
         );
     },
 
@@ -197,17 +215,17 @@ const EditRecord = React.createClass({
                 </div>
             );
         } else if (type === 'integer') {
-            return <NumberPicker className={validClass} defaultValue={value} onChange={setter} />
+            return <NumberPicker className={validClass} defaultValue={value} onChange={setter} disabled={this.state.readOnly} />
         } else if (type === 'number') {
-            return <NumberPicker className={validClass} defaultValue={value} onChange={setter} />
+            return <NumberPicker className={validClass} defaultValue={value} onChange={setter} disabled={this.state.readOnly} />
         } else if (type === 'string') {
             const value_str = ""+(value || "");
             if (schema.get('enum')) {
-                return <DropdownList className={validClass} defaultValue={value_str} data={schema.get('enum').toJS()} onChange={setter} />
+                return <DropdownList className={validClass} defaultValue={value_str} data={schema.get('enum').toJS()} onChange={setter} disabled={this.state.readOnly} />
             } else if (schema.get('format') === 'date-time') {
                 const initial = (value_str && value_str !== "") ? moment(value_str).toDate() : null;
                 return <DateTimePicker className={validClass} defaultValue={initial}
-                        onChange={date => setter(moment(date).toISOString())} />
+                        onChange={date => setter(moment(date).toISOString())} disabled={this.state.readOnly} />
             } else if (schema.get('format') === 'email') {
                 return <input type="text" className={"form-control"+ validClass} placeholder="email@example.com"
                         value={value_str} onChange={event => setter(event.target.value)} />
@@ -268,7 +286,7 @@ const EditRecord = React.createClass({
         };
         return (
             <DateTimePicker format={"LL"} time={false} finalView={"year"}
-                        defaultValue={initial} onChange={onChange} />
+                        defaultValue={initial} onChange={onChange} disabled={this.state.readOnly} />
         );
     },
 
@@ -293,12 +311,12 @@ const EditRecord = React.createClass({
             const languages = serverCache.getLanguages();
             field = (languages instanceof Error) ? <Err err={languages}/> :
                 <SelectBig data={languages}
-                    onSelect={x=>this.setValue(schema, path, x)} value={this.getValue(path)} />;
+                    onSelect={x=>this.setValue(schema, path, x)} value={this.getValue(path)} readOnly={this.state.readOnly} />;
         } else if (path.length === 2 && path[0] === 'disciplines') {
             const disciplines = serverCache.getDisciplines();
             field = (disciplines instanceof Error) ? <Err err={disciplines}/> :
                 <SelectBig data={disciplines}
-                    onSelect={x=>this.setValue(schema, path, x)} value={this.getValue(path)} />;
+                    onSelect={x=>this.setValue(schema, path, x)} value={this.getValue(path)} readOnly={this.state.readOnly} />;
         } else if (schema.get('type') === 'array') {
             const itemSchema = schema.get('items');
             const raw_values = this.getValue(path);
@@ -457,7 +475,26 @@ const EditRecord = React.createClass({
         this.componentWillReceiveProps(this.props);
     },
 
+
+    getCurrentUserRoles(currentUser, currentDraftCommunityID){
+        var check = false;
+        currentUser.get('roles').forEach(role => {
+            if(currentDraftCommunityID == role.get('id')){
+                check = true;
+            }
+        });
+        return check;
+    },
+
     componentWillReceiveProps(props) {
+        // The current user should be abble to only see his/her own drafts and submitted records
+        if (props.record && this.props.currentUser){
+            const ownerID = props.record.getIn(['metadata', 'owners']).first();
+            if(ownerID == this.props.currentUser.get('id')){
+                this.setState({checkPermission:true});
+            }
+        }
+
         if (props.record && !this.state.record) {
             let record = props.record.get('metadata');
             if (!record.has('community_specific')) {
@@ -465,10 +502,26 @@ const EditRecord = React.createClass({
             }
             record = addEmptyMetadataBlocks(record, props.blockSchemas) || record;
             this.setState({record});
+            this.setState({reviewOrPublishConfirmed:record.get('publication_state')});
         } else if (this.state.record && props.blockSchemas) {
             const record = addEmptyMetadataBlocks(this.state.record, props.blockSchemas);
             if (record) {
                 this.setState({record});
+            }
+        }
+
+        // Record is submitted for review: the publication_state is 'submitted' and readonly should be True.
+        // Also, check if the current user is the community administrator who should review the 
+        // submitted draft and if so, set the isResponsibleAdmin state to true.
+        if(this.props.community){
+            if(this.props.community.get("publication_workflow") == 'review_and_publish' && this.props.publicationState=='submitted' && !this.state.revokeSubmitted){
+                this.setState({readOnly: true});
+                    // Check if the current user is an admin of this draft's community who can review this draft
+                    const isResponsibleAdmin = this.getCurrentUserRoles(this.props.currentUser, this.props.community.get('roles').get('admin').get('id'));
+                    this.setState({isResponsibleAdmin});
+            }
+            if(this.state.adminUserIsEditing){
+                this.setState({readOnly: false});
             }
         }
 
@@ -550,6 +603,29 @@ const EditRecord = React.createClass({
         return errors;
     },
 
+    componentDidUpdate(prevProps, prevState) {
+        const original = this.props.record.get('metadata').toJS();
+        let updated = this.state.record.toJS();
+        // The checkbox at the end of the page  is enabled and record is going to be "submitted" for review by community admin
+        if(prevState.record){
+            if (prevState.record.get('publication_state') !== this.state.record.get('publication_state') && !this.state.revokeSubmitted){
+                const patch = compare(original, updated);
+                if (!patch || !patch.length) {
+                    this.setState({dirty:false});
+                    return;
+                }
+                this.updateBrowserState(patch, 'submitted');
+            }
+        }
+
+        // Revoking the submitted record for review. Going back to the draft mode.
+        if(prevState.revokeSubmitted !== this.state.revokeSubmitted && this.state.revokeSubmitted){
+            updated['publication_state'] = 'draft';
+            const patch = compare(original, updated);
+            this.updateBrowserState(patch, 'edit');
+        }
+    },
+
     updateRecord(event) {
         event.preventDefault();
         const errors = this.findValidationErrors();
@@ -557,25 +633,96 @@ const EditRecord = React.createClass({
             this.setState({errors});
             return;
         }
-        const original = this.props.record.get('metadata').toJS();
-        const updated = this.state.record.toJS();
-        const patch = compare(original, updated);
-        if (!patch || !patch.length) {
-            this.setState({dirty:false});
-            return;
-        }
-        const afterPatch = (record) => {
-            if (this.props.isDraft && !this.isForPublication()) {
-                this.props.refreshCache();
-                // TODO(edima): when a draft is publised, clean the state of
-                // records in versioned chain, to trigger a refetch of
-                // versioning data
-                this.setState({dirty:false, waitingForServer: false});
-                notifications.clearAll();
-            } else {
-                browser.gotoRecord(record.id);
+
+        if(this.state.reviewOrPublishConfirmed == 'draft'){
+            // Save draft
+            const original = this.props.record.get('metadata').toJS();
+            const updated = this.state.record.toJS();
+            const patch = compare(original, updated);
+            if (!patch || !patch.length) {
+                this.setState({dirty:false});
+                return;
             }
+            this.updateBrowserState(patch, 'save_draft');
+        } else if(this.state.reviewOrPublishConfirmed == 'published' && this.state.record.get('publication_state') == 'published'){
+            // Editing metadata of a published record (workflow = direct_publish)
+            const original = this.props.record.get('metadata').toJS();
+            const updated = this.state.record.toJS();
+            const patch = compare(original, updated);
+            if (!patch || !patch.length) {
+                this.setState({dirty:false});
+                return;
+            }
+            this.updateBrowserState(patch, 'edit_metadata');
+        } else {
+            // (review workflow) submit a record for review or (direct publish workflow) Publishing a record
+            const record = this.state.record.set('publication_state', this.state.reviewOrPublishConfirmed);
+            this.setState({record});
         }
+    },
+
+    updateBrowserState(patch, caseValue) {
+        let afterPatch;
+        switch (caseValue) {
+            case 'submitted':
+                afterPatch = (record) => {
+                    // Sending a record for review
+                    if (this.props.community.get("publication_workflow") == 'review_and_publish'){
+                        this.setState({dirty:false, waitingForServer: false, readOnly: true});
+                        notifications.warning(`This record is submitted and waiting for review by your community administrator`);
+                        browser.gotoEditRecord(record.id);
+                    } else {
+                        // direct publish workflow
+                        browser.gotoRecord(record.id);
+                    }
+                }
+                break;
+
+            case 'edit_or_reject':
+                afterPatch = (record) => {
+                    this.setState({waitingForServer: false, revokeSubmitted: false});
+                    notifications.clearAll();
+                    browser.gotoEditRecord(record.id);
+                }
+                break;
+
+            case 'save_draft':
+                afterPatch = (record) => {
+                        this.props.refreshCache();
+                        // TODO(edima): when a draft is publised, clean the state of
+                        // records in versioned chain, to trigger a refetch of
+                        // versioning data
+                        this.setState({dirty: false, waitingForServer: false, reviewOrPublishConfirmed: 'draft'});
+                        notifications.clearAll();
+                    }
+                break;
+
+            case 'edit_metadata':
+                afterPatch = (record) => {
+                    // TODO(edima): when a draft is publised, clean the state of
+                    // records in versioned chain, to trigger a refetch of
+                    // versioning data
+                    this.setState({dirty:false, waitingForServer: false});
+                    notifications.clearAll();
+                    browser.gotoRecord(record.id);
+                }
+                break;
+
+            case 'accept_and_publish':
+                afterPatch = (record) =>{
+                    browser.gotoRecord(record.id);
+                    // TODO: Send an email to the record owner and notify her
+                }
+                break;
+
+            case 'reject':
+                afterPatch = (record) =>{
+                    browser.gotoSearch({"community":this.props.community.get("id"),"submitted":1,"drafts":1});
+                    // TODO: Send an email to the record owner and notify her
+                }
+                break;
+        }
+
         const onError = (xhr) => {
             this.setState({waitingForServer: false});
             onAjaxError(xhr);
@@ -587,19 +734,30 @@ const EditRecord = React.createClass({
             } catch (_) {
             }
         }
-
         this.setState({waitingForServer: true});
         this.props.patchFn(patch, afterPatch, onError);
     },
 
+    editSubmittedDraft(event){
+        event.preventDefault();
+        const record = this.state.record.set('publication_state', "draft");
+        this.setState({record});
+        this.setState({dirty:false, reviewOrPublishConfirmed:'draft', revokeSubmitted:true, readOnly:false});
+    },
+
+    adminEditSubmittedDraft(event){
+        // When the admin user is editting the sumbitted draft, the 'publication_state' should still be 'submitted'
+        event.preventDefault();
+        this.setState({dirty:false, readOnly:false, adminUserIsEditing:true});
+    },
+
     isForPublication() {
-        return this.state.record.get('publication_state') == 'submitted';
+        return this.state.reviewOrPublishConfirmed == 'submitted';
     },
 
     setPublishedState(e) {
         const state = e.target.checked ? 'submitted' : 'draft';
-        const record = this.state.record.set('publication_state', state);
-        this.setState({record});
+        this.setState({reviewOrPublishConfirmed:state});
     },
 
     renderUpdateRecordForm() {
@@ -616,23 +774,114 @@ const EditRecord = React.createClass({
     },
 
     renderSubmitDraftForm() {
-        const klass = this.state.waitingForServer ? 'disabled' :
-                      this.isForPublication() ? 'btn-primary btn-danger' :
-                      this.state.dirty ? 'btn-primary' : 'disabled';
-        const text = this.state.waitingForServer ? "Updating record, please wait..." :
-                      this.isForPublication() ? 'Save and Publish' :
-                      this.state.dirty ? 'Save Draft' : 'The draft is up to date';
-        return (
-            <div className="col-sm-offset-3 col-sm-9">
-                <label style={{fontSize:18, fontWeight:'normal'}}>
-                    <input type="checkbox" value={this.isForPublication} onChange={this.setPublishedState}/>
-                    {" "}Submit draft for publication
-                </label>
-                <p>When the draft is published it will be assigned a PID, making it publicly citable.
-                    But a published record's files can no longer be modified by its owner. </p>
-                <button type="submit" className={"btn btn-default btn-block "+klass} onClick={this.updateRecord}>{text}</button>
-            </div>
-        );
+        if(this.props.community){
+            const klass = this.state.waitingForServer ? 'disabled' :
+                          this.isForPublication() ? 'btn-primary btn-danger' :
+                          this.state.dirty ? 'btn-primary' : 'disabled';
+            const text = this.state.waitingForServer ? "Updating record, please wait..." :
+                         this.props.community.get("publication_workflow") == 'review_and_publish' ? (this.isForPublication() ? 'Save and submit for review' : 
+                                                                                                    this.state.dirty ? 'Save Draft' : 'The draft is up to date')
+                                                                                                 : (this.isForPublication() ? 'Save and Publish' :
+                                                                                                    this.state.dirty ? 'Save Draft' : 'The draft is up to date');
+            const label = this.props.community.get("publication_workflow") == 'review_and_publish' ? " Submit draft for review by your community administrator" : " Submit draft for publication";
+            const publicationNote = this.props.community.get("publication_workflow") == 'review_and_publish' ? "" : "When the draft is published it will be assigned a PID, making it publicly citable. But a published record's files can no longer be modified by its owner."
+
+            return (
+                <div className="col-sm-offset-3 col-sm-9">
+                    <label style={{fontSize:18, fontWeight:'normal'}}>
+                        <input type="checkbox" value={this.isForPublication} onChange={this.setPublishedState}/>
+                        {label}
+                    </label>
+                    <p>{publicationNote}</p>
+                    <button type="submit" className={"btn btn-default btn-block "+klass} onClick={this.updateRecord}>{text}</button>
+                </div>
+            );
+        }
+    },
+
+    rejectSubmittedDraft(event){
+        event.preventDefault();
+        // Change the "record_state" from "submitted" to "draft"
+        const original = this.props.record.get('metadata').toJS();
+        const updated = this.state.record.toJS();
+        updated['publication_state'] = 'draft';
+        const patch = compare(original, updated);
+        if (!patch || !patch.length) {
+            return;
+        }
+        this.updateBrowserState(patch, 'reject');
+    },
+
+    acceptSubmittedDraft(event){
+        event.preventDefault();
+        // Changes the "record_state" from "submitted" to "published"
+        const original = this.props.record.get('metadata').toJS();
+        const updated = this.state.record.toJS();
+        updated['publication_state'] = 'published';
+        const patch = compare(original, updated);
+        if (!patch || !patch.length) {
+            return;
+        }
+        this.updateBrowserState(patch, 'accept_and_publish');
+    },
+
+    renderButtons(){
+        if(this.state.record.get('publication_state') == 'submitted'){
+            if(this.state.isResponsibleAdmin){
+                // Current user is a responsible admin to approve or reject the submitted draft
+                // Then there will be two cases: either the admin is editing the submitted draft or not
+                if(this.state.readOnly){
+                    return(
+                        <div>
+                            <div className="row">
+                                <div className="col-sm-offset-3 col-sm-9">
+                                    <button type="submit" className={"btn btn-default btn-block btn-primary btn-danger "} onClick={this.adminEditSubmittedDraft}>Edit</button>
+                                </div>
+                            </div>
+                            <p></p>
+                            <div className="row">
+                                <div className="col-sm-offset-3 col-sm-4">
+                                    <button type="submit" className={"btn btn-default btn-block btn-primary btn-danger "} onClick={this.rejectSubmittedDraft}>Reject the submitted draft</button>
+                                </div>
+                                <div className="col-sm-5">
+                                    <button type="submit" className={"btn btn-default btn-block btn-primary btn-danger "} onClick={this.acceptSubmittedDraft}>Accept the submitted draft and publish it</button>
+                                </div>
+                            </div>
+                        </div>
+                        )
+                } else {
+                    // The admin is editing the submitted draft
+                    return(
+                        <div>
+                            <div className="row">
+                                <div className="col-sm-offset-3 col-sm-4">
+                                    <button type="submit" className={"btn btn-default btn-block btn-primary btn-danger "} onClick={this.rejectSubmittedDraft}>Reject the submitted draft</button>
+                                </div>
+                                <div className="col-sm-5">
+                                    <button type="submit" className={"btn btn-default btn-block btn-primary btn-danger "} onClick={this.acceptSubmittedDraft}>Accept the submitted draft and publish it</button>
+                                </div>
+                            </div>
+                        </div>
+                        )
+                }
+            } else {
+                // A non admin user is submitting a draft for review
+                return(
+                    <div className="form-group submit row" style={{margin:'2em 0', paddingTop:'2em', borderTop:'1px solid #eee'}}>
+                        <div className="col-sm-offset-3 col-sm-9">
+                            <p> Note that by editing the record, it will be revoked and won't being reviewd by your community admin anymore. You will need to submit it again. </p>
+                            <button type="submit" className={"btn btn-default btn-block btn-primary btn-danger "} onClick={this.editSubmittedDraft}>Edit</button>
+                        </div>
+                    </div>)
+            }
+        } else {
+            // The workflow is direct publish, only needs an 'Edit' button
+            return (<div className="form-group submit row" style={{margin:'2em 0', paddingTop:'2em', borderTop:'1px solid #eee'}}>
+                {pairs(this.state.errors).map( ([id, msg]) =>
+                    <div className="col-sm-offset-3 col-sm-9 alert alert-warning" key={id}>{msg} </div>) }
+                { this.props.isDraft ? this.renderSubmitDraftForm() : this.renderUpdateRecordForm() }
+            </div>)
+        }
     },
 
     render() {
@@ -640,6 +889,9 @@ const EditRecord = React.createClass({
         const blockSchemas = this.props.blockSchemas;
         if (!this.state.record || !rootSchema) {
             return <Wait/>;
+        }
+        if (!this.state.checkPermission){
+            return <Err err={this.state.record}/>;
         }
         const editTitle = "Editing " + (this.props.isDraft ? "draft" : "record") + (this.props.isVersion ?  " version": "");
         return (
@@ -666,6 +918,7 @@ const EditRecord = React.createClass({
                         { this.props.isDraft ? this.renderFileBlock() : false }
                     </div>
                     <div className="col-xs-12">
+                    <fieldset disabled={this.state.readOnly}>
                         <form className="form-horizontal" onSubmit={this.updateRecord}>
                             { this.renderFieldBlock(null, rootSchema) }
 
@@ -673,14 +926,11 @@ const EditRecord = React.createClass({
                                 blockSchemas.map(([id, blockSchema]) =>
                                     this.renderFieldBlock(id, (blockSchema||Map()).get('json_schema'))) }
                         </form>
+                    </fieldset>
                     </div>
                 </div>
                 <div className="row">
-                    <div className="form-group submit row" style={{margin:'2em 0', paddingTop:'2em', borderTop:'1px solid #eee'}}>
-                        {pairs(this.state.errors).map( ([id, msg]) =>
-                            <div className="col-sm-offset-3 col-sm-9 alert alert-warning" key={id}>{msg} </div>) }
-                        { this.props.isDraft ? this.renderSubmitDraftForm() : this.renderUpdateRecordForm() }
-                    </div>
+                    {this.renderButtons()}
                 </div>
             </div>
         );
