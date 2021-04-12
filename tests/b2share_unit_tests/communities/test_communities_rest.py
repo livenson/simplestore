@@ -220,15 +220,14 @@ def test_invalid_get(app, login_user,
     with app.app_context():
         with app.test_client() as client:
             login_user(allowed_user, client)
-            unknown_uuid = uuid.uuid4()
+            unknown_uuid = uuid.uuid4().hex
             # check that GET with non existing id will return 404
             headers = [('Content-Type', 'application/json'),
                        ('Accept', 'application/json')]
             res = client.get(url_for('b2share_communities.communities_item',
-                                     community_id=str(unknown_uuid)),
+                                     community_id=unknown_uuid),
                              headers=headers)
             assert res.status_code == 404
-
             # create community
             created_community = Community.create_community(
                 **community_metadata)

@@ -124,8 +124,7 @@ def test_deposit_add_unknown_fields(app, draft_deposits):
             deposit = deposit.patch([
                 {'op': 'add', 'path': path, 'value': 'any value'}
             ])
-            with pytest.raises(ValidationError):
-                deposit.commit()
+            pytest.raises(ValidationError, deposit.commit)
 
 
 
@@ -155,7 +154,7 @@ def test_deposit_create_with_invalid_community_fails(app,
 
     with app.app_context():
         # test with an invalid community
-        data['community'] = str(uuid.uuid4())
+        data['community'] = uuid.uuid4().hex
         with pytest.raises(InvalidDepositError):
             deposit = create_deposit(data=data)
 
@@ -172,7 +171,7 @@ def test_change_deposit_community(app, draft_deposits):
     with app.app_context():
         deposit = Deposit.get_record(draft_deposits[0].deposit_id)
         # test changing the community id
-        deposit['community'] = str(uuid.uuid4())
+        deposit['community'] = uuid.uuid4().hex
         with pytest.raises(InvalidDepositError):
             deposit.commit()
 
@@ -180,6 +179,8 @@ def test_change_deposit_community(app, draft_deposits):
 def test_deposit_create_with_incomplete_metadata(app,
                                                  test_incomplete_records_data):
     """Test deposit creation with incomplete metadata succeeds."""
+
+            
     with app.app_context():
         for data in test_incomplete_records_data:
             deposit = create_deposit(data=data.incomplete_data)
@@ -254,10 +255,10 @@ def test_create_deposit_with_external_pids_errors(
 def test_patch_deposit_with_external_pids_errors(app,
                                                  deposit_with_external_pids):
     """Test errors when an invalid PATCH modifies the external files."""
+    from jsonpatch import JsonPatchConflict
     with app.app_context():
         deposit = deposit_with_external_pids.get_deposit()
-        with pytest.raises(ValidationError,
-                           match="'ePIC_PID' is a required property.*"):
+        with pytest.raises(JsonPatchConflict):
             deposit = deposit.patch([
                 {
                     "op": "replace",
@@ -270,8 +271,7 @@ def test_patch_deposit_with_external_pids_errors(app,
             deposit.commit()
 
         deposit = deposit_with_external_pids.get_deposit()
-        with pytest.raises(ValidationError,
-                           match="'key' is a required property.*"):
+        with pytest.raises(JsonPatchConflict):
             deposit = deposit.patch([
                 {
                     "op": "replace",
@@ -282,9 +282,7 @@ def test_patch_deposit_with_external_pids_errors(app,
                 }
             ])
             deposit.commit()
-        with pytest.raises(ValidationError,
-                           match="Additional properties are not allowed "
-                           "\('unknown' was unexpected\).*"):
+        with pytest.raises(JsonPatchConflict):
             deposit = deposit.patch([
                 {
                     "op": "replace",

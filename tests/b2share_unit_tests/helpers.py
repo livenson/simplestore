@@ -37,7 +37,7 @@ from six import string_types, BytesIO
 from flask_login import login_user, logout_user
 from invenio_accounts.models import User
 from b2share.modules.deposit.api import Deposit
-from b2share_demo.helpers import resolve_community_id, resolve_block_schema_id
+from b2share.modules.b2share_demo.helpers import resolve_community_id, resolve_block_schema_id
 from b2share.modules.deposit.api import PublicationStates
 from b2share.modules.deposit.minters import b2share_deposit_uuid_minter
 from invenio_indexer.api import RecordIndexer
@@ -46,6 +46,8 @@ from flask_principal import ActionNeed
 from invenio_access.models import ActionRoles, ActionUsers
 from invenio_access.permissions import ParameterizedActionNeed
 from invenio_pidstore.models import PersistentIdentifier
+from invenio_oauth2server.models import Token
+from invenio_oauth2server import current_oauth2server
 
 
 def url_for_file(bucket_id, key):
@@ -238,7 +240,7 @@ def create_deposit(data, creator=None, files=None, version_of=None):
 
     def create(data):
         data = deepcopy(data)
-        record_uuid = uuid.uuid4()
+        record_uuid = uuid.uuid4().hex
         # Create persistent identifier
         b2share_deposit_uuid_minter(record_uuid, data=data)
         deposit = Deposit.create(data=data, id_=record_uuid,

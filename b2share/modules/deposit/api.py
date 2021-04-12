@@ -41,7 +41,7 @@ from jsonpatch import apply_patch
 
 from invenio_db import db
 from invenio_files_rest.models import Bucket, FileInstance, ObjectVersion
-from invenio_deposit.api import Deposit as InvenioDeposit, has_status, preserve
+from invenio_deposit.api import Deposit as InvenioDeposit, has_status, preserve, index
 from invenio_records_files.api import Record
 from invenio_records_files.models import RecordsBuckets
 from invenio_records.errors import MissingModelError
@@ -73,6 +73,65 @@ from b2share.modules.deposit.providers import DepositUUIDProvider
 from b2share.modules.handle.proxies import current_handle
 from b2share.modules.handle.errors import EpicPIDError
 
+class MyRecordIndexer(RecordIndexer):
+
+    def delete(self, record, **kwargs):
+        """Delete a record.
+
+        :param record: Record instance.
+        :param kwargs: Passed to
+            :meth:`elasticsearch:elasticsearch.Elasticsearch.delete`.
+        """
+        index, doc_type = self.record_to_index(record)
+        index, doc_type = self._prepare_index(index, doc_type)
+
+        # Pop version arguments for backward compatibility if they were
+        # explicit set to None in the function call.
+        if 'version' in kwargs and kwargs['version'] is None:
+            kwargs.pop('version', None)
+            kwargs.pop('version_type', None)
+        else:
+            kwargs.setdefault('version', record.revision_id)
+            kwargs.setdefault('version_type', self._version_type)
+
+        # HK: This was neccessary because Invenio-Index uses str(UUID) instead of UUID.hex ...
+        # B2share is still using hex id's for records identifiers.
+        # Please note: this is not consistent accross all code, for example communities ID are str(UUID)
+        
+        return self.client.delete(
+            id=record.id.hex,
+            index=index,
+            doc_type=doc_type,
+            **kwargs
+        )
+
+class MyInvenioDeposit(InvenioDeposit):
+
+    indexer = MyRecordIndexer()
+
+    """Default deposit indexer."""
+    @classmethod
+    @index
+    def create(cls, data, id_=None):
+        id_ = id_ or uuid.uuid4().hex
+
+        if '_deposit' not in data:
+            cls.deposit_minter(id_, data)
+
+        data['_deposit'].setdefault('owners', list())
+        if current_user and current_user.is_authenticated:
+            creator_id = int(current_user.get_id())
+
+            if creator_id not in data['_deposit']['owners']:
+                data['_deposit']['owners'].append(creator_id)
+
+            data['_deposit']['created_by'] = creator_id
+
+        # HK: Invoke create method from super of InvenioDeposit, which is invenio-record-files !
+        # Reason: That method in that class supports the 'with_bucket' parameter, which we need to set to False
+
+        return super(InvenioDeposit, cls).create(data, id_=id_ , with_bucket=False)
+
 
 class PublicationStates(Enum):
     """States of a record."""
@@ -84,7 +143,7 @@ class PublicationStates(Enum):
     """Deposit is published."""
 
 
-class Deposit(InvenioDeposit):
+class Deposit(MyInvenioDeposit):
     """B2Share Deposit API."""
 
     published_record_class = B2ShareRecord
@@ -117,7 +176,7 @@ class Deposit(InvenioDeposit):
 
     @has_status
     # check also that these fields are not mutable on the published records too
-    @preserve(fields=['_internal', '_files', '_oai', '_deposit'])
+    @preserve(fields=['_internal', '_files', '_oai', '_deposit', '_bucket'])
     def patch(self, patch):
         """Patch record metadata.
         :params patch: Dictionary of record metadata.
@@ -157,7 +216,12 @@ class Deposit(InvenioDeposit):
     @property
     def record_pid(self):
         """Return the published/reserved record PID."""
-        return PersistentIdentifier.get('b2rec', self.id.hex)
+        if isinstance(self.id, uuid.UUID):
+            id = self.id.hex
+        else:
+            id = self.id
+
+        return PersistentIdentifier.get('b2rec', id)
 
     @property
     def versioning(self):
@@ -426,6 +490,7 @@ class Deposit(InvenioDeposit):
 
     def delete(self):
         """Delete a deposit."""
+
         deposit_pid = self.pid
         pid_value = deposit_pid.pid_value
         record_pid = RecordUUIDProvider.get(pid_value).pid

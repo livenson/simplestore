@@ -25,10 +25,32 @@
 
 import json
 
-from flask_principal import Permission, Need
+from flask_principal import Permission as _Permission, Need
 from invenio_access.permissions import (
-    DynamicPermission, ParameterizedActionNeed,
+    ParameterizedActionNeed,
+    Permission
 )
+
+class DynamicPermission(Permission):
+    """Represents set of required needs.
+    Works like :py:class:`~.Permission` except that any action not
+    allowed/restricted to any users, roles or system roles are allowed by
+    default instead of restricted.
+    .. warning::
+        This class is adopted from invenio-access <1.0.0 since it was 
+        removed there.
+        The class works significantly different from normal 
+        invenio-access.Permission class in that if ``ActionNeed`` 
+        or :py:data:`~.ParameterizedActionNeed` is not allowed or restricted
+        to any user or role then it is **ALLOWED** to anybody.
+    """
+
+    allow_by_default = True
+
+    def __init__(self, *args, **kwargs):
+        """Constructor."""
+        super(DynamicPermission, self).__init__(*args, **kwargs)
+
 
 
 AllowAllPermission = type('Allow', (), {
@@ -77,9 +99,6 @@ class StrictDynamicPermission(DynamicPermission):
         - Identities can also provide a need without using the database.
         - The permission is not given even if there are no needs in the
             database. Thus the action is not allowed by default.
-
-    NOTE: This could be deprecated as the current version of invenio-access'
-    DynamicPermission class forbids by default instead of allowing.
     """
     def __init__(self, *needs):
         self.explicit_excludes = set()
@@ -98,7 +117,7 @@ class StrictDynamicPermission(DynamicPermission):
         return excludes
 
 
-class PermissionSet(Permission):
+class PermissionSet(_Permission):
     """Abstract permissions combining multiple permissions.
 
     Default Flask-Principal permissions just test the intersection of

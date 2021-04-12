@@ -23,7 +23,7 @@
 
 """Records search class and helpers."""
 
-from elasticsearch_dsl.query import Bool, Q
+from elasticsearch_dsl.query import Bool, Q, MatchAll
 from flask import has_request_context, request
 from invenio_search.api import RecordsSearch
 from flask_security import current_user
@@ -44,7 +44,6 @@ def _in_draft_request():
     """
     return has_request_context() and 'drafts' in request.args
 
-
 class B2ShareRecordsSearch(RecordsSearch):
     """Search class for records."""
 
@@ -60,8 +59,8 @@ class B2ShareRecordsSearch(RecordsSearch):
         def doc_types(self):
             """Find the right document type to search for."""
             if _in_draft_request():
-                return 'deposit'
-            return 'record'
+                return '_doc'
+            return '_doc'
 
     class Meta(metaclass=MetaClass):
         """Default index and filter for record search."""
@@ -69,6 +68,7 @@ class B2ShareRecordsSearch(RecordsSearch):
     def __init__(self, all_versions=False, **kwargs):
         """Initialize instance."""
         super(B2ShareRecordsSearch, self).__init__(**kwargs)
+
         if _in_draft_request():
             if not current_user.is_authenticated:
                 raise AnonymousDepositSearch()
@@ -76,7 +76,27 @@ class B2ShareRecordsSearch(RecordsSearch):
             if StrictDynamicPermission(superuser_access).can():
                 return
 
-            filters = [Q('term', **{'_deposit.owners': current_user.id})]
+            filters = Bool(
+                must=[
+                        Q('term', **{'_deposit.owners': current_user.id})
+                    ]
+                )
+
+            # filters = Bool(
+            #     must=[
+            #             Q('term', **{'_deposit.owners': current_user.id}),
+            #             Q('term', **{'publication_state': 'draft'}) 
+            #         ]
+            #     )
+
+            from b2share.modules.deposit.permissions import list_readable_communities
+
+            # HK: Deposits index in B2Share V2 is reocrding 'records' also in the 'deposit' index.
+            # this was filtered additionally with the 'deposit' doc_type.
+            # in ElasticSearch 7 / B2Share V3 this is no longer the case. Therefor we need to apply
+            # a 'must' clause to enforce to read 'draft' deposits only
+            # Code below is not clearly understood, seems not to comply with any use-case according to Hari
+            # We keep the code but probably is is not used.
 
             readable_communities = list_readable_communities(current_user.id)
             for publication_state in readable_communities.all:
@@ -91,7 +111,7 @@ class B2ShareRecordsSearch(RecordsSearch):
 
             # otherwise filter returned deposits
             self.query = Bool(
-                must=self.query._proxied,
+                must=MatchAll(),
                 should=filters,
                 minimum_should_match=1
             )
@@ -99,8 +119,9 @@ class B2ShareRecordsSearch(RecordsSearch):
             if not all_versions:
                 # search for last record versions only
                 filters = [Q('term', **{'_internal.is_last_version': True})]
+                print("RECORDS", filters)
                 self.query = Bool(
-                    must=self.query._proxied,
+                    must=MatchAll(),
                     should=filters,
                     minimum_should_match=1
                 )

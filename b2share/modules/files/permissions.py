@@ -25,7 +25,7 @@
 from functools import partial
 
 from invenio_access.permissions import (
-    superuser_access, ParameterizedActionNeed, DynamicPermission
+    superuser_access, ParameterizedActionNeed
 )
 from invenio_db import db
 from invenio_files_rest.models import Bucket, MultipartObject, ObjectVersion
@@ -33,10 +33,9 @@ from invenio_records.api import Record
 from invenio_records_files.api import FileObject
 from invenio_records_files.models import RecordsBuckets
 from b2share.modules.access.permissions import (
-    DenyAllPermission, StrictDynamicPermission, OrPermissions
+    DenyAllPermission, StrictDynamicPermission, OrPermissions, DynamicPermission
 )
 from flask_principal import Permission, UserNeed
-from b2share.modules.deposit.api import PublicationStates
 
 from b2share.modules.records.utils import is_publication, is_deposit
 
@@ -120,6 +119,8 @@ class DepositFilesPermission(RecordFilesPermission):
 
     def _load_additional_permissions(self):
         """Create additional permission."""
+        from b2share.modules.deposit.api import PublicationStates
+
         if self.record['publication_state'] == \
                 PublicationStates.published.name:
             # Nobody can access published deposit files, for now at least
